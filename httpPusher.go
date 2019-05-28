@@ -1,4 +1,4 @@
-package push
+package frontpush
 
 import (
 	"bytes"
@@ -38,7 +38,7 @@ func (hp *HTTPPusher) Push(r io.Reader) (io.Reader, error) {
 		req.SetBasicAuth(hp.User, hp.Pass)
 	}
 
-	if len(hp.Headers) >  0 {
+	if len(hp.Headers) > 0 {
 		for k, v := range hp.Headers {
 			req.Header.Set(k, v)
 		}
