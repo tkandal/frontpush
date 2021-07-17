@@ -23,7 +23,7 @@ type HTTPPusher struct {
 	Pass         string
 	Method       string
 	Logger       *zap.SugaredLogger
-	Headers      map[string]string
+	Headers      map[string][]string
 	Timeout      time.Duration
 	client       *http.Client
 	HistogramVec *prometheus.HistogramVec
@@ -33,7 +33,8 @@ type HTTPPusher struct {
 func (hp *HTTPPusher) Push(r io.Reader) (io.Reader, error) {
 	u, err := url.Parse(hp.URL)
 	if err != nil {
-		hp.Logger.Warnw("URL not parseable", "error", err.Error())
+		hp.Logger.Errorw(fmt.Sprintf("URL %s is not parseable", hp.URL), "error", err)
+		return nil, err
 	}
 
 	status := http.StatusOK
@@ -47,20 +48,28 @@ func (hp *HTTPPusher) Push(r io.Reader) (io.Reader, error) {
 		}
 	}(time.Now())
 
-	req, err := http.NewRequest(hp.Method, hp.URL, r)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(hp.Timeout))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, hp.Method, hp.URL, r)
 	if err != nil {
 		status = http.StatusInternalServerError
-		hp.Logger.Errorw("new request failed", "error", err.Error())
+		hp.Logger.Errorw(fmt.Sprintf("% %s new request failed", hp.Method, hp.URL), "error", err)
 		return nil, err
 	}
 
-	if len(hp.User) > 0 && len(hp.Pass) > 0 {
+	if len(hp.User) > 0 || len(hp.Pass) > 0 {
 		req.SetBasicAuth(hp.User, hp.Pass)
 	}
 
 	if len(hp.Headers) > 0 {
-		for k, v := range hp.Headers {
-			req.Header.Set(k, v)
+		for key, values := range hp.Headers {
+			for i, value := range values {
+				if i > 0 {
+					req.Header.Add(key, value)
+				} else {
+					req.Header.Set(key, value)
+				}
+			}
 		}
 	}
 
@@ -68,22 +77,21 @@ func (hp *HTTPPusher) Push(r io.Reader) (io.Reader, error) {
 		hp.client = &http.Client{}
 	}
 
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(hp.Timeout))
-	defer cancel()
-
-	resp, err := hp.client.Do(req.WithContext(ctx))
+	resp, err := hp.client.Do(req)
 	if err != nil {
 		status = http.StatusInternalServerError
-		hp.Logger.Errorw("request failed", "error", err.Error())
+		hp.Logger.Errorw(fmt.Sprintf("%s %s request failed", hp.Method, hp.URL), "error", err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	respBuf := &bytes.Buffer{}
-	_, err = respBuf.ReadFrom(resp.Body)
-	if err != nil {
+	if _, err := respBuf.ReadFrom(resp.Body); err != nil {
 		status = http.StatusInternalServerError
-		hp.Logger.Errorw("read response failed", "error", err.Error())
+		hp.Logger.Errorw(fmt.Sprintf("%s %s read response failed", hp.Method, hp.URL), "error", err)
 		return nil, err
 	}
 
